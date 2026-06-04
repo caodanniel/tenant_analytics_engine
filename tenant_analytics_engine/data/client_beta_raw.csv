@@ -1,0 +1,4 @@
+tracking_no,event_date,hours_elapsed
+TRK-99,2026-05-12 14:30:00,18.0
+TRK-ERROR,2026-05-13 11:15:00,72.5
+TRK-88,INVALID_DATE,10.0

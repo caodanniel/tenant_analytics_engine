@@ -1,0 +1,24 @@
+{
+  "tenants": {
+    "client_alpha": {
+      "tenant_name": "Alpha Manufacturing",
+      "column_mapping": {
+        "part_id": "asset_id",
+        "timestamp": "event_timestamp",
+        "duration": "delay_hours"
+      },
+      "date_format": "%m/%d/%Y",
+      "max_allowed_delay_hours": 24.0
+    },
+    "client_beta": {
+      "tenant_name": "Beta 3PL Logistics",
+      "column_mapping": {
+        "tracking_no": "asset_id",
+        "event_date": "event_timestamp",
+        "hours_elapsed": "delay_hours"
+      },
+      "date_format": "%Y-%m-%d %H:%M:%S",
+      "max_allowed_delay_hours": 48.0
+    }
+  }
+}
