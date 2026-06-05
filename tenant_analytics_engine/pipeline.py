@@ -3,12 +3,13 @@ import json
 import sqlite3
 from datetime import datetime
 import pandas as pd
-from pydantic import BaseModel, Field, ValidationError
+import math
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from typing import Dict, List
+from sklearn.ensemble import IsolationForest
+import numpy as np
 
-# ==========================================
 # 1. PYDANTIC SCHEMAS FOR CONFIG & VALIDATION
-# ==========================================
 
 class TenantConfig(BaseModel):
     tenant_name: str
@@ -26,9 +27,15 @@ class UnifiedRecord(BaseModel):
     event_timestamp: datetime
     delay_hours: float
 
-# ==========================================
+    @field_validator('delay_hours')
+    @classmethod
+    def check_not_nan(cls, v: float) -> float:
+        if math.isnan(v):
+            raise ValueError("Value cannot be NaN (Not a Number)")
+        return v
+
 # 2. SQLITE DATABASE SCHEMA SETUP
-# ==========================================
+
 
 DB_PATH = "database.db"
 
@@ -66,36 +73,46 @@ def init_db():
     conn.commit()
     conn.close()
 
-# ==========================================
+
 # 3. PIPELINE ENGINE PROCESSING LOGIC
-# ==========================================
-def check_for_anomaly(tenant_id: str, current_value: float) -> int:
+def check_for_anomaly_ml(tenant_id: str, current_value: float, current_time: datetime) -> int:
     """
-    Queries historical database norms for a specific tenant.
-    Flags an anomaly (returns 1) if the value deviates by more than 2.5 standard deviations.
+    Uses an Isolation Forest to detect multi-dimensional operational outliers
+    based on delay length, hour of day, and day of the week.
     """
     conn = sqlite3.connect(DB_PATH)
-    # Fetch historical values for this specific tenant
-    query = "SELECT delay_hours FROM unified_events WHERE tenant_id = ?"
+    # Pull history for this specific client
+    query = "SELECT delay_hours, event_timestamp FROM unified_events WHERE tenant_id = ?"
     df_hist = pd.read_sql_query(query, conn, params=(tenant_id,))
     conn.close()
     
-    # Cold-start strategy: If we have fewer than 5 historical records, we don't have enough context to flag anomalies
-    if len(df_hist) < 5:
+    # Cold-start rule: Isolation Forest requires baseline historical data to learn patterns
+    if len(df_hist) < 10:
         return 0
         
-    mean = df_hist['delay_hours'].mean()
-    std_dev = df_hist['delay_hours'].std()
+    # 1. Feature Engineering: Extract time-of-day features from history
+    df_hist['datetime'] = pd.to_datetime(df_hist['event_timestamp'])
+    df_hist['hour'] = df_hist['datetime'].dt.hour
+    df_hist['day_of_week'] = df_hist['datetime'].dt.dayofweek
     
-    # Prevent division by zero if all historical elements are identical
-    if std_dev == 0:
-        return 0
-        
-    z_score = abs(current_value - mean) / std_dev
+    # Prepare training feature array: Shape (N, 3)
+    X_train = df_hist[['delay_hours', 'hour', 'day_of_week']].values
     
-    # Flag anything outside 2.5 standard deviations from the mean
-    if z_score > 2.5:
-        print(f"  [ANOMALY DETECTED] Tenant {tenant_id} value {current_value} is highly unusual (Z-Score: {z_score:.2f})")
+    # 2. Current Record Feature Engineering
+    current_hour = current_time.hour
+    current_day = current_time.weekday()
+    X_current = np.array([[current_value, current_hour, current_day]])
+    
+    # 3. Train the Isolation Forest Model
+    # contamination=0.05 targets a roughly 5% expected outlier rate
+    model = IsolationForest(contamination=0.05, random_state=42)
+    model.fit(X_train)
+    
+    # 4. Predict anomaly status (-1 = outlier, 1 = normal)
+    prediction = model.predict(X_current)[0]
+    
+    if prediction == -1:
+        print(f"  [ML ANOMALY ALERT] Outlier patterns detected for {tenant_id}!")
         return 1
         
     return 0
@@ -192,7 +209,11 @@ def process_tenant(tenant_id: str, file_path: str, config: TenantConfig):
             continue
             
         # 4. Check for Statistical Anomalies (NEW STRETCH STEP)
-        anomaly_flag = check_for_anomaly(tenant_id, clean_record.delay_hours)
+        anomaly_flag = check_for_anomaly_ml(
+            tenant_id=tenant_id,
+            current_value=clean_record.delay_hours,
+            current_time=clean_record.event_timestamp
+        )
             
         # 5. Check client threshold metrics
         threshold_flag = 1 if clean_record.delay_hours > config.max_allowed_delay_hours else 0
@@ -221,8 +242,6 @@ def run_pipeline():
         target_file = f"data/{tenant_id}_raw.csv"
         process_tenant(tenant_id, target_file, tenant_rules)
 
-if __name__ == "__main__":
-    run_pipeline()
 
 
 def generate_audit_report():
